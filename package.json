@@ -9,7 +9,8 @@
   "private": false,
   "scripts": {
     "build": "tsc --project tsconfig.json",
-    "start": "node lib/app.js"
+    "start": "node lib/app.js",
+    "test": "mocha --reporter spec --require ts-node/register test/**/*.ts"
   },
   "dependencies": {
     "@octokit/rest": "^16.28.7",
@@ -22,8 +23,13 @@
     "yaml": "^1.6.0"
   },
   "devDependencies": {
+    "@types/chai": "^4.1.7",
+    "@types/mocha": "^5.2.7",
     "@types/node": "^12.6.9",
     "@types/yaml": "^1.0.2",
+    "chai": "^4.2.0",
+    "mocha": "^6.2.0",
+    "ts-node": "^8.3.0",
     "typescript": "^3.5.3"
   }
 }
