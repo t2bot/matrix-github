@@ -6,11 +6,14 @@ import uuid from "uuid/v4";
 import qs from "querystring";
 import { BridgeRoom, BridgeRoomAccountData, BRIDGE_ROOM_TYPE } from "./BridgeRoom";
 import { MatrixEvent, MatrixMessageContent, MatrixMemberContent } from "../MatrixEvent";
+import { LogWrapper } from "../LogWrapper";
 
 export interface AdminAccountData extends BridgeRoomAccountData {
     type: "admin",
     admin_user: string;
 }
+
+const log = new LogWrapper("AdminRoom");
 
 export class AdminRoom implements BridgeRoom {
 
@@ -60,6 +63,7 @@ export class AdminRoom implements BridgeRoom {
             return true;
         }
         const command = (matrixEvent as MatrixEvent<MatrixMessageContent>).content.body;
+        log.info(`${this.userId} issued command '${command.split(" ")[0]}'`);
         const cmdLower = command.toLowerCase();
         if (cmdLower.startsWith("!setpersonaltoken ")) {
             const accessToken = command.substr("!setPersonalToken ".length);
@@ -115,6 +119,4 @@ export class AdminRoom implements BridgeRoom {
     private async sendNotice(noticeText: string) {
         return this.botIntent.sendText(this.roomId, noticeText, "m.notice");
     }
-    // Initiate oauth
-    // Relinquish oauth
 }

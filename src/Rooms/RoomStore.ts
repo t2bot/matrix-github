@@ -39,10 +39,7 @@ export class RoomStore {
                     roomId, adminAccountData.admin_user, this.intent, this.tokenStore, this.config,
                 ));
             } else if (accountData.type === "issue") {
-                const issueRoom = new IssueRoom(
-                    roomId,
-                    this.intent,
-                );
+                const issueRoom = new IssueRoom(roomId, this.intent, this.config);
                 this.issueRooms.set(roomId, issueRoom);
                 statePromises.push(issueRoom.getRoomState());
             } else {
@@ -50,7 +47,7 @@ export class RoomStore {
                 // it was created manually or by a future version of this software.
                 try {
                     // This could be a legacy issue room. Check its room state and confirm.
-                    const legacyIssueRoom = new IssueRoom(roomId, this.intent);
+                    const legacyIssueRoom = new IssueRoom(roomId, this.intent, this.config);
                     await legacyIssueRoom.migrateLegacyRoom();
                     this.issueRooms.set(roomId, legacyIssueRoom);
                 } catch (ex) {
@@ -67,6 +64,10 @@ export class RoomStore {
 
     public getRoom(roomId: string): BridgeRoom|undefined {
         return this.issueRooms.get(roomId) || this.adminRooms.get(roomId);
+    }
+
+    public findRoomForIssue(owner: string, repo: string, issue: number): IssueRoom|undefined {
+        return [...this.issueRooms.values()].find((r) => r.state.org === owner && r.state.repo === repo && r.issue === issue);
     }
 
     public getWithOauthState(state: string): AdminRoom|undefined {
