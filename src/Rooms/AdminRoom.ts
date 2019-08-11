@@ -1,13 +1,31 @@
 import { Intent } from "matrix-bot-sdk";
 import Octokit, {  } from "@octokit/rest";
-import { UserTokenStore } from "./UserTokenStore";
-import { BridgeConfig } from "./Config";
+import { UserTokenStore } from "../UserTokenStore";
+import { BridgeConfig } from "../Config";
 import uuid from "uuid/v4";
 import qs from "querystring";
+import { BridgeRoom, BridgeRoomAccountData, BRIDGE_ROOM_TYPE } from "./BridgeRoom";
+import { MatrixEvent, MatrixMessageContent, MatrixMemberContent } from "../MatrixEvent";
 
-export const BRIDGE_ROOM_TYPE = "uk.half-shot.matrix-github.room";
+export interface AdminAccountData extends BridgeRoomAccountData {
+    type: "admin",
+    admin_user: string;
+}
 
-export class AdminRoom {
+export class AdminRoom implements BridgeRoom {
+
+    static async tryCreateNew(memberEvent: MatrixEvent<MatrixMemberContent>, intent: Intent, tokenStore: UserTokenStore, config: BridgeConfig): Promise<AdminRoom|undefined> {
+        const roomId = memberEvent.room_id;
+        await intent.joinRoom(roomId);
+        const adminRoom = new AdminRoom(roomId, memberEvent.sender, intent, tokenStore, config);
+        const members = await intent.underlyingClient.getJoinedRoomMembers(roomId);
+        if (members.filter((userId) => ![intent.userId, memberEvent.sender].includes(userId)).length !== 0) {
+            await adminRoom.sendNotice("This bridge currently only supports invites to 1:1 rooms");
+            await intent.underlyingClient.leaveRoom(roomId);
+            return;
+        }
+        return adminRoom;
+    }
 
     private pendingOAuthState: string|null = null;
 
@@ -27,20 +45,34 @@ export class AdminRoom {
         this.pendingOAuthState = null;
     }
 
-    public async handleCommand(command: string) {
+    public async storeRoom() {
+        await this.botIntent.underlyingClient.setRoomAccountData(BRIDGE_ROOM_TYPE, this.roomId, {
+            type: "admin",
+            admin_user: this.userId,
+        } as AdminAccountData);
+    }
+
+    public async onEvent(matrixEvent: MatrixEvent<unknown>) {
+        if (matrixEvent.type !== "m.room.message") {
+            return true;
+        }
+        if (matrixEvent.sender !== this.userId) {
+            return true;
+        }
+        const command = (matrixEvent as MatrixEvent<MatrixMessageContent>).content.body;
         const cmdLower = command.toLowerCase();
         if (cmdLower.startsWith("!setpersonaltoken ")) {
             const accessToken = command.substr("!setPersonalToken ".length);
             await this.setPersonalAccessToken(accessToken);
-            return;
         } else if (cmdLower.startsWith("!hastoken")) {
             await this.hasPersonalToken();
-            return;
         } else if (cmdLower.startsWith("!startoauth")) {
             await this.beginOAuth();
-            return;
+        } else {
+            await this.sendNotice("Command not understood");
         }
-        await this.sendNotice("Command not understood");
+        // Always consume a command.
+        return true;
     }
 
     private async setPersonalAccessToken(accessToken: string) {

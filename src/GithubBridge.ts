@@ -6,12 +6,13 @@ import { BridgeConfig } from "./Config";
 import { IWebhookEvent, IOAuthRequest, IOAuthTokens } from "./GithubWebhooks";
 import { CommentProcessor } from "./CommentProcessor";
 import { MessageQueue, createMessageQueue } from "./MessageQueue/MessageQueue";
-import { AdminRoom, BRIDGE_ROOM_TYPE } from "./AdminRoom";
+import { AdminRoom } from "./Rooms/AdminRoom";
 import { UserTokenStore } from "./UserTokenStore";
 import { FormatUtil } from "./FormatUtil";
 import { MatrixEvent, MatrixMemberContent, MatrixMessageContent, MatrixEventContent } from "./MatrixEvent";
 import { LogWrapper } from "./LogWrapper";
 import { IMatrixSendMessage, IMatrixSendMessageResponse } from "./MatrixSender";
+import { RoomStore } from "./Rooms/RoomStore";
 
 const md = new markdown();
 const log = new LogWrapper("GithubBridge");
@@ -19,24 +20,22 @@ const log = new LogWrapper("GithubBridge");
 export class GithubBridge {
     private octokit!: Octokit;
     private as!: Appservice;
-    private adminRooms: Map<string, AdminRoom>;
-    private roomIdtoBridgeState: Map<string, IBridgeRoomState[]>;
-    private orgRepoIssueToRoomId: Map<string, string>;
-    private matrixHandledEvents: Set<string>;
+    private roomStore!: RoomStore;
     private commentProcessor!: CommentProcessor;
     private queue!: MessageQueue;
     private tokenStore!: UserTokenStore;
+
+    private roomIdtoBridgeState: Map<string, IBridgeRoomState[]>;
+    private orgRepoIssueToRoomId: Map<string, string>;
+    private matrixHandledEvents: Set<string>;
 
     constructor(private config: BridgeConfig, private registration: IAppserviceRegistration) {
         this.roomIdtoBridgeState = new Map();
         this.orgRepoIssueToRoomId = new Map();
         this.matrixHandledEvents = new Set();
-        this.adminRooms = new Map();
     }
 
     public async start() {
-        this.adminRooms = new Map();
-
         this.queue = createMessageQueue(this.config);
 
         log.debug(this.queue);
@@ -56,6 +55,10 @@ export class GithubBridge {
             registration: this.registration,
             storage,
         });
+
+        this.roomStore = new RoomStore(this.as.botIntent, this.tokenStore, this.config);
+        const initStorePromise = this.roomStore.initStore();
+
 
         this.commentProcessor = new CommentProcessor(this.as, this.config.bridge.mediaUrl);
 
@@ -91,7 +94,7 @@ export class GithubBridge {
         });
 
         this.queue.on<IOAuthRequest>("oauth.response", async (msg) => {
-            const adminRoom = [...this.adminRooms.values()].find((r) => r.oauthState === msg.data.state);
+            const adminRoom = this.roomStore.getWithOauthState(msg.data.state);
             this.queue.push<boolean>({
                 data: !!(adminRoom),
                 sender: "GithubBridge",
@@ -101,7 +104,7 @@ export class GithubBridge {
         });
 
         this.queue.on<IOAuthTokens>("oauth.tokens", async (msg) => {
-            const adminRoom = [...this.adminRooms.values()].find((r) => r.oauthState === msg.data.state);
+            const adminRoom = this.roomStore.getWithOauthState(msg.data.state);
             if (!adminRoom) {
                 log.warn("Could not find admin room for successful tokens request. This shouldn't happen!");
                 return;
@@ -110,24 +113,7 @@ export class GithubBridge {
             await this.tokenStore.storeUserToken(adminRoom.userId, msg.data.access_token);
         });
 
-        // Fetch all room state
-        const joinedRooms = await this.as.botIntent.underlyingClient.getJoinedRooms();
-        for (const roomId of joinedRooms) {
-            log.info("Fetching state for " + roomId);
-            try {
-                const accountData = await this.as.botIntent.underlyingClient.getRoomAccountData(
-                    BRIDGE_ROOM_TYPE, roomId,
-                );
-                if (accountData.type === "admin") {
-                    this.adminRooms.set(roomId, new AdminRoom(
-                        roomId, accountData.admin_user, this.as.botIntent, this.tokenStore, this.config,
-                    ));
-                }
-                continue;
-            } catch (ex) { /* this is an old style room */ }
-            await this.getRoomBridgeState(roomId);
-        }
-
+        await initStorePromise;
         await this.as.begin();
         log.info("Started bridge");
     }
@@ -159,59 +145,25 @@ export class GithubBridge {
     }
 
     private async onRoomEvent(roomId: string, event: MatrixEvent<unknown>) {
+        const room = await this.roomStore.getRoom(roomId);
         const isOurUser = this.as.isNamespacedUser(event.sender);
-        // if (isOurUser) {
-        //     log.debug("Not handling our own events.");
-        //     // We don't handle any IRC side stuff yet.
-        //     return;
-        // }
 
-        if (event.type === "m.room.member" && !isOurUser) {
+        if (room) {
+            log.debug(`Found ${room.constructor.name} for ${roomId}`);
+            if ( await room.onEvent(event, isOurUser)) {
+                return;
+            }
+        } else if (event.type === "m.room.member" && !isOurUser) {
             const memberEvent = event as MatrixEvent<MatrixMemberContent>;
             if (memberEvent.content.membership !== "invite") {
                 return;
             }
-            await this.as.botIntent.joinRoom(roomId);
-            const members = await this.as.botIntent.underlyingClient.getJoinedRoomMembers(roomId);
-            if (members.filter((userId) => ![this.as.botUserId, event.sender].includes(userId)).length !== 0) {
-                await this.sendMatrixText(
-                    roomId,
-                    "This bridge currently only supports invites to 1:1 rooms",
-                    "m.notice",
-                );
-                await this.as.botIntent.underlyingClient.leaveRoom(roomId);
+            const adminRoom = await AdminRoom.tryCreateNew(memberEvent, this.as.botIntent, this.tokenStore, this.config);
+            if (adminRoom === undefined) {
+                log.warn(`Could not create admin room for ${roomId} (${event.sender})`);
                 return;
             }
-            await this.as.botIntent.underlyingClient.setRoomAccountData(
-                BRIDGE_ROOM_TYPE, roomId, {admin_user: event.sender, type: "admin"},
-            );
-            this.adminRooms.set(
-                roomId,
-                new AdminRoom(roomId, event.sender, this.as.botIntent, this.tokenStore, this.config)
-            );
-        }
-
-        if (event.type === "m.room.message" && this.adminRooms.has(roomId)) {
-            const messageEvent = event as MatrixEvent<MatrixMessageContent>;
-            const room = this.adminRooms.get(roomId)!;
-            if (room.userId !== event.sender) {
-                return;
-            }
-            const command = messageEvent.content.body;
-            if (!command) {
-                return;
-            }
-            await this.adminRooms.get(roomId)!.handleCommand(command);
-            return;
-        }
-
-        if (event.type === BRIDGE_STATE_TYPE) {
-            const state = event as IBridgeRoomState;
-            log.info(`Got new state for ${roomId}`);
-            await this.getRoomBridgeState(roomId, state);
-            // Get current state of issue.
-            await this.syncIssueState(roomId, state);
-            return;
+            await adminRoom.storeRoom();
         }
 
         const bridgeState = await this.getRoomBridgeState(roomId);
@@ -421,7 +373,7 @@ export class GithubBridge {
     private async onIssueEdited(event: IWebhookEvent) {
         if (!event.changes) {
             log.debug("No changes given");
-            return; // No changes made.
+            return;
         }
 
         const issueKey = `${event.repository!.owner.login}/${event.repository!.name}#${event.issue!.number}`;
@@ -456,22 +408,23 @@ export class GithubBridge {
     }
 
     private async onMatrixIssueComment(event: MatrixEvent<MatrixMessageContent>, bridgeState: IBridgeRoomState) {
-        // TODO: Someone who is not lazy should make this work with oauth.
         const senderToken = await this.tokenStore.getUserToken(event.sender);
-        if (senderToken === null) {
-            // TODO: Bridge via bot.
-            log.warn(`Cannot handle event from ${event.sender}. No user token configured`);
-            return;
+        let body = await this.commentProcessor.getCommentBodyForEvent(event.content);
+        let octokit: Octokit;
+        if (senderToken !== null) {
+            octokit = new Octokit({
+                auth: senderToken,
+                userAgent: "matrix-github v0.0.1",
+            });
+        } else {
+            octokit = this.octokit;
+            body = `\`${event.sender}\`: ${body}`;
         }
-        const clientKit = new Octokit({
-            auth: senderToken,
-            userAgent: "matrix-github v0.0.1",
-        });
 
-        const result = await clientKit.issues.createComment({
+        const result = await octokit.issues.createComment({
             repo: bridgeState.content.repo,
             owner: bridgeState.content.org,
-            body: await this.commentProcessor.getCommentBodyForEvent(event.content),
+            body,
             issue_number: parseInt(bridgeState.content.issues[0], 10),
         });
         const key =

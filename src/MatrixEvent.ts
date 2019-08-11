@@ -1,4 +1,5 @@
 export interface MatrixEvent<T extends MatrixEventContent|unknown> {
+    room_id: string;
     content: T;
     event_id: string;
     origin_server_ts: number;
