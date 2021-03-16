@@ -45,7 +45,7 @@ export class GithubBridge {
 
     constructor(private config: BridgeConfig, private registration: IAppserviceRegistration) { }
 
-    private async createConnectionForState(roomId: string, state: MatrixEvent<any>) {
+    private createConnectionForState(roomId: string, state: MatrixEvent<any>) {
         log.debug(`Looking to create connection for ${roomId}`);
         if (state.content.disabled === false) {
             log.debug(`${roomId} has disabled state for ${state.type}`);
@@ -63,8 +63,7 @@ export class GithubBridge {
             if (!this.github) {
                 throw Error('GitHub is not configured');
             }
-            const issue = new GitHubIssueConnection(roomId, this.as, state.content, state.state_key || "", this.tokenStore, this.commentProcessor, this.messageClient, this.github);
-            await issue.syncIssueState();
+            return new GitHubIssueConnection(roomId, this.as, state.content, state.state_key || "", this.tokenStore, this.commentProcessor, this.messageClient, this.github);
         }
         if (GitLabRepoConnection.EventTypes.includes(state.type)) {
             if (!this.config.gitlab) {
@@ -97,12 +96,7 @@ export class GithubBridge {
 
     private async createConnectionsForRoomId(roomId: string): Promise<IConnection[]> {
         const state = await this.as.botClient.getRoomState(roomId);
-        const connections: IConnection[] = [];
-        for (const event of state) {
-            const conn = await this.createConnectionForState(roomId, event);
-            if (conn) { connections.push(conn); }
-        }
-        return connections;
+        return state.map((event) => this.createConnectionForState(roomId, event)).filter((connection) => !!connection) as unknown as IConnection[];
     }
 
     private getConnectionsForGithubIssue(org: string, repo: string, issueNumber: number): (GitHubIssueConnection|GitLabRepoConnection)[] {
